@@ -35,18 +35,19 @@ def create_chunks(docs:list[Document], chunk_size:int=512, chunk_overlap:int=100
    
    return chunks
 
-def create_embeddings_and_store(chunks:list[Document], persist_directory:str="db/chroma_db") -> Chroma:
+def create_embeddings_and_store(chunks:list[Document], persist_directory:str="db/vector_store") -> Chroma:
 
    embedding_model = OpenAIEmbeddings(model="text-embedding-3-small")
 
    # create chroma db vector store
-
    vector_store = Chroma.from_documents(
       documents=chunks,
       embedding=embedding_model,
-      persist_directory=persist_directory
+      persist_directory=persist_directory,
+      collection_metadata={"hnsw":"cosine"},
    )
-   
+
+   return vector_store
 
 def main():
    
