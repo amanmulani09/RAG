@@ -1,89 +1,220 @@
+from __future__ import annotations
+
+import os
+from collections import deque
+from typing import Deque
+
 from dotenv import load_dotenv
+
 from langchain_chroma import Chroma
-from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
-# Load environment variables
-load_dotenv()
+from langchain_core.messages import (
+    HumanMessage,
+    AIMessage,
+)
 
-# Connect to your document database
-persistent_directory = "db/chroma_db"
-embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
-db = Chroma(persist_directory=persistent_directory, embedding_function=embeddings)
+from langchain_core.prompts import (
+    ChatPromptTemplate,
+    MessagesPlaceholder,
+)
 
-# Set up AI model
-model = ChatOpenAI(model="gpt-4o")
+from langchain.chains import (
+    create_history_aware_retriever,
+    create_retrieval_chain,
+)
 
-# Store our conversation as messages
-chat_history = []
+from langchain.chains.combine_documents import (
+    create_stuff_documents_chain,
+)
 
-def ask_question(user_question):
-    print(f"\n--- user asked: {user_question} ---")
-    
-    # Step 1: Make the question clear using conversation history
-    if chat_history:
-        # Ask AI to make the question standalone
-        messages = [
-            SystemMessage(content="Given the chat history, rewrite the new question to be standalone and searchable. Just return the rewritten question."),
-        ] + chat_history + [
-            HumanMessage(content=f"New question: {user_question}")
-        ]
-        
-        result = model.invoke(messages)
-        search_question = result.content.strip()
-        print(f"Searching for: {search_question}")
-    else:
-        search_question = user_question
-    
-    # Step 2: Find relevant documents
-    retriever = db.as_retriever(search_kwargs={"k": 3})
-    docs = retriever.invoke(search_question)
-    
-    print(f"Found {len(docs)} relevant documents:")
-    for i, doc in enumerate(docs, 1):
-        # Show first 2 lines of each document
-        lines = doc.page_content.split('\n')[:2]
-        preview = '\n'.join(lines)
-        print(f"  Doc {i}: {preview}...")
-    
-    # Step 3: Create final prompt
-    combined_input = f"""Based on the following documents, please answer this question: {user_question}
 
-    Documents:
-    {"\n".join([f"- {doc.page_content}" for doc in docs])}
-
-    Please provide a clear, helpful answer using only the information from these documents. If you can't find the answer in the documents, say "I don't have enough information to answer that question based on the provided documents."
+class ConversationalRAG:
     """
-    
-    # Step 4: Get the answer
-    messages = [
-        SystemMessage(content="You are a helpful assistant that answers questions based on provided documents and conversation history."),
-    ] + chat_history + [
-        HumanMessage(content=combined_input)
-    ]
-    
-    result = model.invoke(messages)
-    answer = result.content
-    
-    # Step 5: Remember this conversation
-    chat_history.append(HumanMessage(content=user_question))
-    chat_history.append(AIMessage(content=answer))
-    
-    print(f"Answer: {answer}")
-    return answer
+    Production-friendly conversational RAG wrapper.
 
-# Simple chat loop
-def start_chat():
-    print("Ask me questions! Type 'quit' to exit.")
-    
+    Responsibilities:
+    - Load vector database
+    - Manage retrieval
+    - Rewrite contextual questions
+    - Maintain chat history
+    - Generate grounded answers
+    """
+
+    def __init__(
+        self,
+        persist_directory: str,
+        llm_model: str = "gpt-4o",
+        embedding_model: str = "text-embedding-3-small",
+        history_size: int = 10,
+        top_k: int = 5,
+    ) -> None:
+
+        self.chat_history: Deque = deque(maxlen=history_size)
+
+        self.llm = ChatOpenAI(
+            model=llm_model,
+            temperature=0,
+        )
+
+        self.embeddings = OpenAIEmbeddings(
+            model=embedding_model,
+        )
+
+        self.vector_store = Chroma(
+            persist_directory=persist_directory,
+            embedding_function=self.embeddings,
+        )
+
+        self.retriever = self.vector_store.as_retriever(
+            search_type="mmr",
+            search_kwargs={
+                "k": top_k,
+                "fetch_k": 20,
+            },
+        )
+
+        self.chain = self._build_chain()
+
+    def _build_chain(self):
+        """
+        Creates:
+        User Question
+            ↓
+        History-aware retriever
+            ↓
+        Chroma
+            ↓
+        Context
+            ↓
+        GPT-4o
+        """
+
+        contextualize_prompt = ChatPromptTemplate.from_messages(
+            [
+                (
+                    "system",
+                    """
+                    Given the conversation history and the latest user question,
+                    rewrite the question so it is fully standalone.
+
+                    Return only the rewritten question.
+                    """,
+                ),
+                MessagesPlaceholder("chat_history"),
+                ("human", "{input}"),
+            ]
+        )
+
+        history_aware_retriever = create_history_aware_retriever(
+            llm=self.llm,
+            retriever=self.retriever,
+            prompt=contextualize_prompt,
+        )
+
+        qa_prompt = ChatPromptTemplate.from_messages(
+            [
+                (
+                    "system",
+                    """
+                    You are a helpful assistant.
+
+                    Use ONLY the provided context to answer.
+
+                    If the answer cannot be found in the context,
+                    reply with:
+
+                    "I don't know based on the provided documents."
+
+                    Context:
+                    {context}
+                    """,
+                ),
+                MessagesPlaceholder("chat_history"),
+                ("human", "{input}"),
+            ]
+        )
+
+        document_chain = create_stuff_documents_chain(
+            llm=self.llm,
+            prompt=qa_prompt,
+        )
+
+        return create_retrieval_chain(
+            history_aware_retriever,
+            document_chain,
+        )
+
+    def ask(self, question: str) -> str:
+        """
+        Ask a question and receive a grounded answer.
+        """
+
+        response = self.chain.invoke(
+            {
+                "input": question,
+                "chat_history": list(self.chat_history),
+            }
+        )
+
+        answer = response["answer"]
+
+        self.chat_history.append(
+            HumanMessage(content=question)
+        )
+
+        self.chat_history.append(
+            AIMessage(content=answer)
+        )
+
+        return answer
+
+    def clear_history(self) -> None:
+        self.chat_history.clear()
+
+
+def main() -> None:
+    load_dotenv()
+
+    if not os.getenv("OPENAI_API_KEY"):
+        raise ValueError(
+            "OPENAI_API_KEY not found in environment."
+        )
+
+    rag = ConversationalRAG(
+        persist_directory="db/chroma_db",
+        llm_model="gpt-4o",
+        embedding_model="text-embedding-3-small",
+        history_size=10,
+        top_k=5,
+    )
+
+    print("Conversational RAG Started")
+    print("Type 'quit' to exit")
+    print("Type 'clear' to reset chat history")
+
     while True:
-        question = input("\nYour question: ")
-        
-        if question.lower() == 'quit':
-            print("Goodbye!")
+        question = input("\nYou: ").strip()
+
+        if not question:
+            continue
+
+        if question.lower() == "quit":
+            print("\nGoodbye!")
             break
-            
-        ask_question(question)
+
+        if question.lower() == "clear":
+            rag.clear_history()
+            print("\nChat history cleared.")
+            continue
+
+        try:
+            answer = rag.ask(question)
+            print(f"\nAssistant: {answer}")
+
+        except Exception as exc:
+            print(f"\nError: {exc}")
+
 
 if __name__ == "__main__":
-    start_chat()
+    main()
