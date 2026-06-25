@@ -1,4 +1,4 @@
-1. requirements
+## requirements
 
 functional
 
@@ -24,18 +24,19 @@ non functional
 
 POST /documents
 
-req:
-{
-"document_name": "insurance.pdf",
-"file": "<binary>"
-}
+Request
 
-res:
+    {
+    "document_name": "insurance.pdf",
+    "file": "<binary>"
+    }
 
-{
-"document_id": "123",
-"status": "processing"
-}
+Response
+
+    {
+    "document_id": "123",
+    "status": "processing"
+    }
 
 Check Processing Status
 
@@ -44,10 +45,10 @@ GET /documents/{id}
 Response:
 
 ```
-{
-"document_id": "123",
-"status": "completed"
-}
+    {
+    "document_id": "123",
+    "status": "completed"
+    }
 ```
 
 ## Query APIs
@@ -58,13 +59,24 @@ POST /chat
 
 Request
 
-{
-"query": "What is claim settlement process?"
-}
+    {
+    "query": "What is claim settlement process?"
+    }
 
-Response:
+Response
 
-{
-"answer": "...",
-"sources": ["page_10"]
-}
+    {
+    "answer": "...",
+    "sources": ["page_10"]
+    }
+
+## High Level Architecture
+
+           User
+            |
+        API Gateway
+            |
+    |       |       |
+            |
+    injection      query flow
+    fllow
